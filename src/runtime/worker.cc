@@ -75,7 +75,7 @@ void RuntimeWorker::eval( Name hash, Name name )
 
       runtimestorage_.fix_cache_.insert_or_update( desired, hash, 0 );
 
-      progress( operations, name );
+      queue_job( Job( name, operations ) );
 
       // return eval(force(name))
       break;
@@ -98,7 +98,7 @@ void RuntimeWorker::force( Name hash, Name name )
 
       runtimestorage_.fix_cache_.insert_or_update( desired, hash, 0 );
 
-      progress( operations, encode_name );
+      queue_job( Job( encode_name, operations ) );
 
       // return force(apply(eval(encode_name)))
       break;
