@@ -1,0 +1,28 @@
+default:
+  @just --list
+
+api: fix-ref
+    cd api && cargo build --target=wasm32-wasi --release
+    ./fix-ref/target/release/fix-ref api/target/wasm32-wasi/release/helloworld.wasm -o unlinked.wasm
+    /home/fchua/fix/build/applications-prefix/src/applications-build/_deps/wasm-tools-build/src/module-combiner/wasmlink --enable-multi-memory \
+           --enable-exceptions \
+           unlinked.wasm \
+           /home/fchua/fix/applications/util/wasi_snapshot_preview1.wasm \
+           -m wasi_command \
+           -n wasi_snapshot_preview1 \
+           -o sys_linked.wasm
+    /home/fchua/fix/build/applications-prefix/src/applications-build/_deps/wasm-tools-build/src/module-combiner/wasmlink \
+        --enable-multi-memory \
+        --enable-exceptions \
+        sys_linked.wasm \
+        /home/fchua/fix/applications/util/fixpoint_storage.wasm \
+        -n fixpoint_storage \
+        -o linked_with_storage.wasm
+    rm unlinked.wasm sys_linked.wasm
+    mv linked_with_storage.wasm output.wasm
+
+fix-ref:
+    cd fix-ref && cargo build --release
+
+run: api
+    /home/fchua/fix/build/src/tester/stateless-tester tree:4 string:unused file:./output.wasm uint32:7 file:./addblob.wasm

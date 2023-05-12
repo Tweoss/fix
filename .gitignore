@@ -2,3 +2,7 @@
 /.ccls-cache
 .fix/
 /.cache
+debug
+applications/util/wasi_snapshot_preview1.wasm
+applications/util/fixpoint_storage.wasm
+interpreter/output.wasm
