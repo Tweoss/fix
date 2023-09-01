@@ -12,9 +12,29 @@ add_executable(compiler-tester "compiler-tester.cc" "tester-utils.cc")
 target_link_libraries(compiler-tester ${FIXPOINT_LIBS})
 target_link_libraries(compiler-tester cryptopp wasmrt absl::flat_hash_map)
 
-add_executable(http-tester "http-tester.cc" "tester-utils.cc")
-target_link_libraries(http-tester ${FIXPOINT_LIBS})
-target_link_libraries(http-tester cryptopp wasmrt absl::flat_hash_map http)
+option(HTTP_TESTER_ENABLE "Enable http-tester target" OFF)
+find_program(CARGO_INSTALLED_IN_PATH "cargo")
+find_program(TRUNK_INSTALLED_IN_PATH "trunk")
+
+if(HTTP_TESTER_ENABLE)
+  if(CARGO_INSTALLED_IN_PATH)
+    if(TRUNK_INSTALLED_IN_PATH)
+      add_custom_target(
+        http-tester-client
+        COMMAND trunk build ${CMAKE_CURRENT_SOURCE_DIR}/http-client/index.html
+                   --dist ${CMAKE_CURRENT_BINARY_DIR}/http-client
+      )
+      add_executable(http-tester "http-tester.cc" "tester-utils.cc")
+      target_link_libraries(http-tester ${FIXPOINT_LIBS})
+      target_link_libraries(http-tester cryptopp wasmrt absl::flat_hash_map http)
+      add_dependencies(http-tester http-tester-client)
+    else()
+      message( FATAL_ERROR "Install trunk before building http tester.")
+    endif()
+  else()
+    message( FATAL_ERROR "Install cargo before building http tester." )
+  endif()
+endif()
 
 add_executable(dependency-tester "dependency-tester.cc" "tester-utils.cc")
 target_link_libraries(dependency-tester ${FIXPOINT_LIBS})
