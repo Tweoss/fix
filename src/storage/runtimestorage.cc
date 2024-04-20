@@ -90,6 +90,20 @@ Handle<Object> RuntimeStorage::get( Handle<Relation> handle )
   throw HandleNotFound( handle );
 }
 
+std::unordered_set<Handle<Relation>> RuntimeStorage::lookup(  Handle<Object> target )
+{
+  auto relations = relations_.read();
+  std::unordered_set<Handle<Relation>> output;
+  cout << "size of relations: " << relations.get().size() << endl;
+  for (const auto& [task, result]: relations.get()) {
+    cout << "checking " << task.content << " ->" << result.content << endl;
+    if (result == target) {
+      output.insert(task.unwrap<Relation>());
+    }
+  }
+  return output;
+}
+
 template<FixType T>
 void RuntimeStorage::visit( Handle<T> handle,
                             std::function<void( Handle<Fix> )> visitor,

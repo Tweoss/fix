@@ -288,6 +288,11 @@ optional<Handle<Object>> Relater::get( Handle<Relation> name )
   }
 }
 
+std::unordered_set<Handle<Relation>> Relater::lookup(  Handle<Object> target )
+{
+  return storage_.lookup(target);
+}
+
 void Relater::put( Handle<Named> name, BlobData data )
 {
   if ( !storage_.contains( name ) ) {

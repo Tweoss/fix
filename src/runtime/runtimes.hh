@@ -25,6 +25,7 @@ public:
   static std::shared_ptr<ReadOnlyRT> init();
   virtual Handle<Value> execute( Handle<Relation> x ) override;
   IRuntime& get_rt() { return relater_; }
+  std::unordered_set<Handle<Relation>> lookup( Handle<Object> handle );
 };
 
 class ReadWriteRT : public ReadOnlyRT

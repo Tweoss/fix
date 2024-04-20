@@ -20,6 +20,11 @@ Handle<Value> ReadOnlyRT::execute( Handle<Relation> x )
   return relater_.execute( x );
 }
 
+std::unordered_set<Handle<Relation>> ReadOnlyRT::lookup( Handle<Object> handle )
+{
+  return relater_.lookup(handle);
+}
+
 Handle<Value> ReadWriteRT::execute( Handle<Relation> x )
 {
   auto res = relater_.execute( x );

@@ -106,6 +106,8 @@ public:
   std::shared_ptr<OwnedTree> get( Handle<AnyTree> name );
   // Get the result of a relation.
   Handle<Object> get( Handle<Relation> name );
+  // Get the relations resulting in an object.
+  std::unordered_set<Handle<Relation>> lookup( Handle<Object> handle );
 
   Handle<Value> get_relation( Handle<Eval> name ) { return get( name ).unwrap<Value>(); }
   Handle<Object> get_relation( Handle<Apply> name ) { return get( name ); }

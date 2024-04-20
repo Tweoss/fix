@@ -1,9 +1,8 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
-#include <boost/property_tree/ptree_fwd.hpp>
-#include <charconv>
-#include <cstdlib>
+#include <glog/logging.h>
 #include <iostream>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <unistd.h>
@@ -13,15 +12,17 @@
 #include "handle.hh"
 #include "http_server.hh"
 #include "mmap.hh"
-#include "operation.hh"
-#include "relation.hh"
-#include "runtime.hh"
-#include "runtimestorage.hh"
+#include "option-parser.hh"
+#include "runtimes.hh"
 #include "socket.hh"
+#include "storage_exception.hh"
 #include "tester-utils.hh"
+#include "types.hh"
 
 using namespace std;
 using namespace boost::property_tree;
+
+extern map<string, pair<function<void( int, char*[] )>, const char*>> commands;
 
 static constexpr size_t mebi = 1024 * 1024;
 
@@ -33,101 +34,107 @@ static constexpr size_t mebi = 1024 * 1024;
  * - tree_contents(handle): returns the contents of this object if it is a tree.
  **/
 
-void kick_off( span_view<char*> args, vector<ReadOnlyFile>& open_files )
-{
-  // make the combination from the given arguments
-  Handle encode_name = parse_args( args, open_files );
-
-  if ( not args.empty() ) {
-    throw runtime_error( "unexpected argument: "s + args.at( 0 ) );
-  }
-
-  // add the combination to the store, and print it
-  cout << "Combination:\n" << pretty_print( encode_name ) << "\n";
-
-  auto& runtime = Runtime::get_instance();
-
-  // make a Thunk that points to the combination
-  Handle thunk_name = encode_name.as_thunk();
-
-  Handle result = runtime.eval( thunk_name );
-
-  cout << "Evaluation completed" << endl;
-  cout << "Thunk name: " << base16::encode( thunk_name ) << endl;
-  cout << "Result name: " << base16::encode( result ) << endl << flush;
-}
-
-ptree serialize_relation( Relation relation )
+ptree serialize_relation( Handle<Relation> relation, Handle<Object> result )
 {
   ptree pt;
 
-  switch ( relation.type() ) {
-    case RelationType::Apply: {
-      pt.put( "relation", "Apply" );
-      break;
-    }
-    case RelationType::COUNT: {
-      break;
-    }
-    case RelationType::Eval: {
-      pt.put( "relation", "Eval" );
-      break;
-    }
-    case RelationType::Fill: {
-      pt.put( "relation", "Fill" );
-      break;
-    }
+  cout << "trying to serialize" << relation.content << " -> " << result << endl;
+  auto content = relation.visit<optional<u8x32>>( overload {
+    [&]( Handle<Eval> h ) {
+      return h.try_into<Object>().transform( [&]( auto x ) {
+        pt.put( "op", "0" );
+        return x.content;
+      } );
+    },
+    [&]( Handle<Apply> h ) {
+      return h
+        .try_into<ObjectTree>()
+        // .and_then( []( auto x ) { return x.template try_into<ObjectTree>(); } )
+        .transform( [&]( auto x ) {
+          pt.put( "op", "1" );
+          return x.content;
+        } );
+    },
+  } );
+  if ( !content.has_value() ) {
+    return pt;
   }
-
-  pt.put( "lhs", base16::encode( relation.lhs() ) );
-  pt.put( "rhs", base16::encode( relation.rhs() ) );
-
+  pt.put( "lhs", base16::encode( content.value() ) );
+  pt.put( "rhs", base16::encode( result.content ) );
   return pt;
 }
 
-ptree get_explanations( Handle handle )
+ptree get_explanations( std::shared_ptr<ReadWriteRT> rt, Handle<Object> handle )
 {
   ptree pt;
-  auto [relations, handles] = Runtime::get_instance().get_explanations( handle );
+  auto relations = rt->lookup( handle );
+  // auto [relations, handles] = rt.get_explanations( handle );
 
-  pt.push_back( ptree::value_type( "target", base16::encode( handle ) ) );
+  pt.push_back( ptree::value_type( "target", base16::encode( handle.content ) ) );
 
+  cout << "explaining handle: " << handle << endl;
   ptree relation_tree;
   for ( auto& relation : relations ) {
-    relation_tree.push_back( ptree::value_type( "", serialize_relation( relation ) ) );
+    cout << relation;
+    relation_tree.push_back( ptree::value_type( "", serialize_relation( relation, handle ) ) );
   }
   pt.push_back( ptree::value_type( "relations", relation_tree ) );
 
   ptree pins_and_tags_tree;
-  for ( auto& handle : handles ) {
-    pins_and_tags_tree.push_back( ptree::value_type( "", base16::encode( handle ) ) );
-  }
+  // TODO: handle pins and tags
+  // for ( auto& handle : handles ) {
+  //   pins_and_tags_tree.push_back( ptree::value_type( "", base16::encode( handle ) ) );
+  // }
   pt.push_back( ptree::value_type( "handles", pins_and_tags_tree ) );
 
   return pt;
 }
 
-ptree get_task_relation( Task task )
+ptree get_task_relation( std::shared_ptr<ReadWriteRT> rt, Handle<Fix> handle, unsigned long op )
 {
   ptree pt;
+  Handle<Relation> h;
 
-  auto relation = Runtime::get_instance().get_task_relation( task );
-  if ( relation.has_value() ) {
-    pt.push_back( ptree::value_type( "relation", serialize_relation( relation.value() ) ) );
+  if ( op == 0 ) {
+    auto o = handle::extract<Object>( handle );
+    if ( !o.has_value() ) {
+      return pt;
+    }
+    h = Handle<Eval>( o.value() );
+  } else if ( op == 1 ) {
+    auto o = handle::extract<ObjectTree>( handle );
+    if ( !o.has_value() ) {
+      return pt;
+    }
+    h = Handle<Apply>( o.value() );
+  } else {
+    return pt;
+  }
+
+  if ( rt->get_rt().contains( h ) ) {
+    auto result = rt->get_rt().get( h );
+    if ( result.has_value() ) {
+      pt = serialize_relation( h, result.value() );
+    }
   }
 
   return pt;
 }
 
-ptree get_tree_contents( Handle handle )
+ptree get_tree_contents( std::shared_ptr<ReadWriteRT> rt, Handle<AnyTree> handle )
 {
   ptree pt;
 
   ptree handles;
-  for ( const auto& entry : Runtime::get_instance().storage().get_tree( handle ) ) {
-    handles.push_back( ptree::value_type( "", base16::encode( entry ) ) );
+  if ( rt->get_rt().contains( handle ) ) {
+    auto result = rt->get_rt().get( handle );
+    if ( result.has_value() ) {
+      for ( const auto& entry : result.value().get()->span() ) {
+        handles.push_back( ptree::value_type( "", base16::encode( entry.content ) ) );
+      }
+    }
+    pt.push_back( ptree::value_type( "handles", handles ) );
   }
-  pt.push_back( ptree::value_type( "handles", handles ) );
 
   return pt;
 }
@@ -204,7 +211,9 @@ optional<tuple<string, string>> try_read_file( string directory, string file_nam
   return make_tuple( content, content_type );
 }
 
-optional<tuple<string, string>> try_get_response( string target, string source_directory )
+optional<tuple<string, string>> try_get_response( string target,
+                                                  string source_directory,
+                                                  std::shared_ptr<ReadWriteRT> rt )
 {
   if ( not target.starts_with( '/' ) ) {
     return {};
@@ -223,17 +232,26 @@ optional<tuple<string, string>> try_get_response( string target, string source_d
   auto map = decode_url_params( target );
   if ( target.starts_with( "explanations" ) ) {
     stringstream ptree;
-    write_json( ptree, get_explanations( base16::decode( map.at( "handle" ) ) ) );
+    write_json( ptree, get_explanations( rt, Handle<Object>::forge( base16::decode( map.at( "handle" ) ) ) ) );
     return make_tuple( ptree.str(), "text/json" );
   } else if ( target.starts_with( "relation" ) ) {
+    stringstream output;
+    auto op = stoul( map.at( "op" ) );
+    write_json( output, get_task_relation( rt, Handle<Fix>::forge( base16::decode( map.at( "handle" ) ) ), op ) );
+    return make_tuple( output.str(), "text/json" );
+  } else if ( target.starts_with( "description" ) ) {
+    // Escape quotation marks in the handle description string.
+    stringstream handle;
+    handle << Handle<Object>::forge( base16::decode( map.at( "handle" ) ) );
+    string handle_str = handle.str();
+    handle_str = regex_replace( handle_str, regex( "\"" ), "\\\"" );
+
     stringstream ptree;
-    write_json(
-      ptree,
-      get_task_relation( Task( base16::decode( map.at( "handle" ) ), Operation( stoul( map.at( "op" ) ) ) ) ) );
+    ptree << "{ \"description\": \"" << handle_str << "\"}";
     return make_tuple( ptree.str(), "text/json" );
   } else if ( target.starts_with( "tree_contents" ) ) {
     stringstream ptree;
-    write_json( ptree, get_tree_contents( ( base16::decode( map.at( "handle" ) ) ) ) );
+    write_json( ptree, get_tree_contents( rt, Handle<AnyTree>::forge( base16::decode( map.at( "handle" ) ) ) ) );
     return make_tuple( ptree.str(), "text/json" );
   }
 
@@ -268,11 +286,13 @@ class Connection
   vector<EventLoop::RuleHandle> rules_ {};
   string source_directory_;
 
+  std::shared_ptr<ReadWriteRT> rt_;
+
   void handle_request( const HTTPRequest& request )
   {
     cerr << "Incoming request: " << request.request_target << "\n";
     std::string target = request.request_target;
-    optional<tuple<string, string>> response = try_get_response( target, source_directory_ );
+    optional<tuple<string, string>> response = try_get_response( target, source_directory_, rt_ );
 
     HTTPResponse the_response;
     the_response.http_version = "HTTP/1.1";
@@ -301,11 +321,13 @@ public:
               TCPSocket&& sock,
               EventLoop& loop,
               const EventLoopCategories& categories,
-              string source_directory )
+              string source_directory,
+              std::shared_ptr<ReadWriteRT> rt )
     : sock_( std::move( sock ) )
     , id_( id )
     , peer_( sock_.peer_address() )
     , source_directory_( source_directory )
+    , rt_( rt )
   {
     sock_.set_blocking( false );
 
@@ -348,29 +370,45 @@ public:
   }
 };
 
-int min_args = 4;
-int max_args = -1;
-
-void program_body( span_view<char*> args )
+void serve( int argc, char* argv[] )
 {
-  ios::sync_with_stdio( false );
+  if ( argc == 0 or string( argv[1] ) == "--help" ) {
+    parser_usage_message();
+    exit( EXIT_FAILURE );
+  }
+
+  auto rt = ReadWriteRT::init();
 
   // Start listening on the specified port.
   TCPSocket server_socket {};
   server_socket.set_reuseaddr();
-  server_socket.bind( { "127.0.0.1", args.at( 1 ) } );
+  server_socket.bind( { "127.0.0.1", argv[1] } );
   server_socket.set_blocking( false );
   server_socket.listen();
   cerr << "Listening on port " << server_socket.local_address().port() << "\n";
 
   // Process the arguments: source_directory and fix program
-  string source_directory = args.at( 2 );
+  string source_directory = argv[2];
   vector<ReadOnlyFile> open_files;
   if ( source_directory.ends_with( '/' ) ) {
     source_directory.pop_back();
   }
-  args.remove_prefix( 3 );
-  kick_off( args, open_files );
+  span<char*> args = { argv + 3, static_cast<size_t>( argc ) - 3 };
+
+  auto handle = parse_args( rt->get_rt(), args );
+
+  if ( !handle::extract<Object>( handle ).has_value() ) {
+    cerr << "Handle is not an Object";
+    exit( EXIT_FAILURE );
+  }
+
+  auto res = rt->execute( Handle<Eval>( handle::extract<Object>( handle ).value() ) );
+
+  cout << "Evaluation completed" << endl;
+  cout << "Thunk name: " << base16::encode( handle.content ) << endl;
+
+  cout << "Result name: " << base16::encode( res.content ) << endl << flush;
+  cout << "Result name: " << res << endl << flush;
 
   EventLoop events;
   EventLoopCategories event_categories { events };
@@ -380,7 +418,7 @@ void program_body( span_view<char*> args )
 
   events.add_rule( "new TCP connection", server_socket, Direction::In, [&] {
     connections.emplace_back(
-      connection_id_counter++, server_socket.accept(), events, event_categories, string( source_directory ) );
+      connection_id_counter++, server_socket.accept(), events, event_categories, string( source_directory ), rt );
   } );
 
   do {
@@ -388,17 +426,80 @@ void program_body( span_view<char*> args )
   } while ( events.wait_next_event( 500 ) != EventLoop::Result::Exit );
 
   cerr << "Exiting...\n";
+  cout << res << endl;
 }
 
-void usage_message( const char* argv0 )
+void help( int argc, char* argv[] );
+
+void decode( int argc, char* argv[] )
 {
-  cerr << "Usage: " << argv0 << " PORT SOURCE_DIR entry...\n";
-  cerr << "   entry :=   file:<filename>\n";
-  cerr << "            | string:<string>\n";
-  cerr << "            | name:<base16-encoded name>\n";
-  cerr << "            | uint<n>:<integer> (with <n> = 8 | 16 | 32 | 64)\n";
-  cerr << "            | tree:<n> (followed by <n> entries)\n";
-  cerr << "            | thunk: (followed by tree:<n>)\n";
-  cerr << "            | compile:<filename>\n";
-  cerr << "            | ref:<ref>\n";
+  OptionParser parser( "decode", commands["decode"].second );
+  const char* handle = NULL;
+  parser.AddArgument(
+    "handle", OptionParser::ArgumentCount::One, [&]( const char* argument ) { handle = argument; } );
+  parser.Parse( argc, argv );
+  if ( !handle )
+    exit( EXIT_FAILURE );
+
+  try {
+    auto result = base16::decode( handle );
+    auto handle = Handle<Fix>::forge( result );
+    cout << handle << "\n";
+  } catch ( std::runtime_error& e ) {
+    cerr << "Error: " << e.what() << "\n";
+    exit( EXIT_FAILURE );
+  }
+}
+
+map<string, pair<function<void( int, char*[] )>, const char*>> commands = {
+  { "serve", { serve, "Evaluate the expression and serve the results via HTTP." } },
+  { "help", { help, "Print a list of sub-commands." } },
+};
+
+void help( ostream& os = cout )
+{
+  os << "http-tester: available commands\n";
+  size_t length = 0;
+  for ( const auto& command : commands ) {
+    if ( command.first.size() > length )
+      length = command.first.size();
+  }
+  for ( const auto& command : commands ) {
+    os << std::format( "    {:{}}    {}\n", command.first, length, command.second.second );
+  }
+}
+void help( int, char*[] )
+{
+  help();
+}
+
+int main( int argc, char* argv[] )
+{
+  if ( argc <= 0 ) {
+    abort();
+  }
+
+  google::InitGoogleLogging( argv[0] );
+  google::SetStderrLogging( google::INFO );
+  google::InstallFailureSignalHandler();
+
+  if ( argc == 1 ) {
+    help();
+    exit( EXIT_FAILURE );
+  }
+
+  for ( const auto& command : commands ) {
+    if ( command.first == argv[1] ) {
+      try {
+        command.second.first( argc - 1, &argv[1] );
+        return EXIT_SUCCESS;
+      } catch ( const StorageException& e ) {
+        cerr << "Error: " << e.what() << "\n";
+        return EXIT_FAILURE;
+      }
+    }
+  }
+
+  help( cerr );
+  return EXIT_FAILURE;
 }
